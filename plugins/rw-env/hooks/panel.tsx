@@ -1,5 +1,5 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register } from 'claude-code'
+import type { EngineInterface, Register, RenderChildren } from 'claude-code'
 
 import type { Key, Status } from '../types'
 
@@ -21,6 +21,14 @@ const isHidden = atom({ plugin: 'rw-env', key: 'isHidden' } as const, false)
 const NAME_OK = /^[A-Z][A-Z0-9_]{0,127}$/
 const TOKEN_OK = /^rwenv_[A-Za-z0-9_-]+$/
 const CODE_OK = /^[A-Z2-9]{4}-[A-Z2-9]{4}$/
+// ReportWORQ's own colours (the product's theme): its teal for headings and the mark's orange for the accent.
+const TEAL = '#37A686'
+const ORANGE = '#F55E31'
+const RED = '#E5484D'
+// The grid: every row of every group has the same columns, so names, results and buttons line up.
+const COL = { name: 28, result: 24, test: 8, link: 12 } as const
+let mark = ''          // the ReportWORQ mark as base64 PNG, read once from the plugin's own assets
+
 const LABEL: Record<string, string> = { ok: 'Works', bad: 'Rejected', unknown: "Couldn't test", format: 'Looks right' }
 type Result = 'ok' | 'bad' | 'unknown' | 'format'
 const RESULTS: readonly string[] = ['ok', 'bad', 'unknown', 'format']
@@ -155,6 +163,22 @@ function summary(s: Status): string {
   return `rw-env · ${bits.join(' · ')}`
 }
 
+async function loadMark($: EngineInterface) {
+  try {
+    const got = await $.fs.read(`${$.plugin.root}/assets/rw-mark.png`, { as: 'bytes' })
+    const b64 = typeof got === 'object' && got && 'base64' in got ? String(got.base64) : ''
+    // A PNG that isn't one would make the engine refuse the whole pane; draw the title alone instead.
+    // The PNG signature then its IHDR chunk, which the engine checks for.
+    mark = b64.startsWith('iVBORw0KGgoAAAANSUhEUg') && b64.length < 200_000 ? b64 : ''
+  } catch {
+    mark = ''
+  }
+}
+
+function resultColor(r: string | undefined): string | undefined {
+  return r === 'ok' ? TEAL : r === 'bad' ? RED : undefined
+}
+
 async function openPane($: EngineInterface) {
   return $.ui.open({ id: PANE, title: 'ReportWORQ keys' })
 }
@@ -163,6 +187,7 @@ export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     const ran = await next(e)
     await $.command.register({ name: 'keys', description: 'Show your ReportWORQ keys and their status' })
+    void loadMark($)
     void look($)        // not awaited: an unreachable lab must not hold up the session
     return ran
   })
@@ -177,93 +202,108 @@ export const register: Register = on => {
     if (e.props.hasSurvey || (await read($, isHidden))) return next(e)
     const s = await read($, status)
     const { Box, Button, Link, Text } = $.ui.resolve(e)
+    const needs = s.state !== 'connected' || s.keys.some(k => k.check?.result === 'bad') || s.missing.length > 0
     return (
-      <Box flexDirection="row">
-        <Text dimColor>{summary(s)}  </Text>
-        {s.isBusy && <Text dimColor>working…  </Text>}
-        {s.state === 'none' && <Button key="connect" onPress={() => { void refresh($) }}>Connect</Button>}
+      <Box flexDirection="row" alignItems="center" columnGap={1}>
+        <Text color={ORANGE} weight="semibold">rw-env</Text>
+        <Text color={needs ? undefined : TEAL} dimColor={!needs}>{summary(s).replace(/^rw-env · /, '')}</Text>
+        {s.isBusy && <Text dimColor>working…</Text>}
+        {s.state === 'none' && <Button key="connect" variant="primary" onPress={() => { void refresh($) }}>Connect</Button>}
         {s.state === 'waiting' && <Link href={`${LAB}/device?code=${s.code}`}>Open the sign-in page</Link>}
-        {s.state === 'waiting' && <Text>  </Text>}
-        {s.state === 'waiting' && <Button key="done" onPress={() => { void refresh($) }}>I pressed Allow</Button>}
+        {s.state === 'waiting' && <Button key="done" variant="primary" onPress={() => { void refresh($) }}>I pressed Allow</Button>}
         {s.state === 'connected' && <Button key="keys" onPress={() => { void openPane($) }}>Keys</Button>}
-        {s.state === 'connected' && <Text> </Text>}
         {s.state === 'connected' && <Button key="refresh" onPress={() => { void refresh($) }}>Refresh</Button>}
-        <Text> </Text>
-        <Button key="hide" onPress={() => { void update($, isHidden, () => true) }}>Hide</Button>
+        <Button key="hide" dimColor onPress={() => { void update($, isHidden, () => true) }}>Hide</Button>
       </Box>
     )
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const s = await read($, status)
-    const { Box, Button, Link, Text } = $.ui.resolve(e)
+    const els = $.ui.resolve(e)
+    const { Box, Button, Link, Text } = els
+    // Only some surfaces draw images; elsewhere the title stands alone.
+    const Image = 'Image' in els ? els.Image : undefined
     const groups = new Map<string, Key[]>()
     for (const k of s.keys) groups.set(k.source, [...(groups.get(k.source) ?? []), k])
     const order = [...groups.keys()].sort((a, b) => (a === 'mine' ? -1 : b === 'mine' ? 1 : a === 'common' ? -1 : b === 'common' ? 1 : a.localeCompare(b)))
-    return (
-      <Box flexDirection="column">
-        <Text bold>{summary(s)}</Text>
-        {s.version !== '' && <Text dimColor>rw-env {s.version}{s.isBusy ? ' · working…' : ''}</Text>}
-        {s.note !== '' && <Text dimColor>{s.note}</Text>}
 
-        {s.state === 'none' && (
+    const cell = (width: number, child: RenderChildren, end = false) => (
+      <Box width={width} flexShrink={0} justifyContent={end ? 'flex-end' : 'flex-start'}>{child}</Box>
+    )
+    const row = (k: Key) => (
+      <Box key={`row-${k.name}`} flexDirection="row" alignItems="center">
+        {cell(COL.name, <Text mono wrap="truncate-end">{k.name}</Text>)}
+        {cell(COL.result, k.check
+          ? <Text color={resultColor(k.check.result)} dimColor={k.check.result !== 'ok' && k.check.result !== 'bad'} wrap="truncate-end">
+              {LABEL[k.check.result] ?? k.check.result}{k.check.detail ? ` (${k.check.detail})` : ''}</Text>
+          : <Text dimColor wrap="truncate-end">{k.testedWith ? `with ${k.testedWith.replace(/_.*$/, '')}` : k.checkable ? 'Not tested yet' : 'No test'}</Text>)}
+        {cell(COL.test, k.checkable && s.isOnline
+          ? <Button key={`test-${k.name}`} onPress={() => { void test($, k.name) }}>Test</Button> : <Text> </Text>, true)}
+        {cell(COL.link, <Link href={`${LAB}/#key=${k.name}`}>{k.source === 'mine' ? 'Change' : 'Use my own'}</Link>, true)}
+      </Box>
+    )
+    const card = (title: string, count: string, body: RenderChildren) => (
+      <Box flexDirection="column" borderStyle="round" borderColor={TEAL} paddingX={1} marginTop={1}>
+        <Box flexDirection="row" columnGap={1}>
+          <Text color={TEAL} weight="semibold">{title}</Text>
+          <Text dimColor>{count}</Text>
+        </Box>
+        {body}
+      </Box>
+    )
+
+    return (
+      <Box flexDirection="column" paddingX={1}>
+        <Box flexDirection="row" alignItems="center" columnGap={1}>
+          {mark !== '' && Image && <Image key="mark" source={{ png: mark }} columns={4} rows={2} alt="ReportWORQ" />}
           <Box flexDirection="column">
-            <Text> </Text>
-            <Text>This computer isn't connected to the ReportWORQ lab yet.</Text>
-            <Button key="connect" onPress={() => { void refresh($) }}>Connect</Button>
+            <Text size="heading" weight="semibold">ReportWORQ keys</Text>
+            <Text dimColor size="caption">{summary(s).replace(/^rw-env · /, '')}{s.version ? `  ·  rw-env ${s.version}` : ''}{s.isBusy ? '  ·  working…' : ''}</Text>
           </Box>
-        )}
-        {s.state === 'waiting' && (
-          <Box flexDirection="column">
-            <Text> </Text>
+        </Box>
+        {s.note !== '' && <Text dimColor size="caption">{s.note}</Text>}
+
+        {s.state === 'none' && card('Connect this computer', '', (
+          <Box flexDirection="column" rowGap={1}>
+            <Text>This computer isn't connected to the ReportWORQ lab yet.</Text>
+            <Box><Button key="connect" variant="primary" onPress={() => { void refresh($) }}>Connect</Button></Box>
+          </Box>
+        ))}
+        {s.state === 'waiting' && card('Almost there', '', (
+          <Box flexDirection="column" rowGap={1}>
             <Text>Open the sign-in page, sign in with Google and press Allow. Then come back here.</Text>
             <Link href={`${LAB}/device?code=${s.code}`}>Open the sign-in page (code {s.code})</Link>
-            <Button key="done" onPress={() => { void refresh($) }}>I pressed Allow</Button>
+            <Box><Button key="done" variant="primary" onPress={() => { void refresh($) }}>I pressed Allow</Button></Box>
           </Box>
-        )}
+        ))}
 
-        {order.map(src => (
+        {order.map(src => card(where(src), `${(groups.get(src) ?? []).length}`, (
+          <Box flexDirection="column">{(groups.get(src) ?? []).map(row)}</Box>
+        )))}
+
+        {s.missing.length > 0 && card('To add', `${s.missing.length}`, (
           <Box flexDirection="column">
-            <Text> </Text>
-            <Text bold>{where(src)}</Text>
-            {(groups.get(src) ?? []).map(k => (
-              <Box flexDirection="row">
-                <Text>{k.name}  </Text>
-                {k.check ? <Text dimColor={k.check.result !== 'bad'} color={k.check.result === 'bad' ? 'red' : undefined}>
-                  {LABEL[k.check.result] ?? k.check.result}{k.check.detail ? ` (${k.check.detail})` : ''}  </Text>
-                  : k.testedWith ? <Text dimColor>tested with {k.testedWith}  </Text>
-                  : k.checkable ? <Text dimColor>not tested yet  </Text> : <Text dimColor>no test  </Text>}
-                {k.checkable && s.isOnline && <Button key={`test-${k.name}`} onPress={() => { void test($, k.name) }}>Test</Button>}
-                <Text> </Text>
-                <Link href={`${LAB}/#key=${k.name}`}>{k.source === 'mine' ? 'Change' : 'Use my own'}</Link>
+            {s.missing.map(n => (
+              <Box key={`add-${n}`} flexDirection="row" alignItems="center">
+                {cell(COL.name, <Text mono wrap="truncate-end">{n}</Text>)}
+                {cell(COL.result, <Text color={ORANGE}>Not set yet</Text>)}
+                {cell(COL.test, <Text> </Text>)}
+                {cell(COL.link, <Link href={`${LAB}/#key=${n}`}>Add</Link>, true)}
               </Box>
             ))}
           </Box>
         ))}
 
-        {s.missing.length > 0 && (
-          <Box flexDirection="column">
-            <Text> </Text>
-            <Text bold>To add</Text>
-            {s.missing.map(n => (
-              <Box flexDirection="row">
-                <Text>{n}  </Text>
-                <Link href={`${LAB}/#key=${n}`}>Add</Link>
-              </Box>
-            ))}
-          </Box>
-        )}
-
-        <Text> </Text>
-        <Box flexDirection="row">
-          {s.state === 'connected' && <Button key="refresh" onPress={() => { void refresh($) }}>Refresh</Button>}
-          <Text>  </Text>
+        <Box flexDirection="row" alignItems="center" columnGap={2} marginTop={1}>
+          {s.state === 'connected' && <Button key="refresh" variant="primary" onPress={() => { void refresh($) }}>Refresh</Button>}
           <Link href={`${LAB}/#add`}>Add a key of my own</Link>
-          <Text>  </Text>
           <Link href={`${LAB}/`}>Environment page</Link>
         </Box>
-        <Text dimColor>Values are never shown here. Changes are made on the Environment page.</Text>
-        <Button key="strip" onPress={() => { void update($, isHidden, h => !h) }}>Show or hide the bar above the message box</Button>
+        <Box flexDirection="row" justifyContent="space-between" marginTop={1}>
+          <Text dimColor size="caption">Values are never shown here. Changes open the Environment page.</Text>
+          <Button key="strip" plain dimColor onPress={() => { void update($, isHidden, h => !h) }}>Toggle the bar</Button>
+        </Box>
       </Box>
     )
   })
