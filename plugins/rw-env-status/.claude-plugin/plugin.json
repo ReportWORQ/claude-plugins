@@ -1,0 +1,6 @@
+{
+  "name": "rw-env-status",
+  "version": "0.0.1",
+  "description": "Test: shows your ReportWORQ lab connection and key names in Claude, never their values.",
+  "types": "./types/index.d.ts"
+}

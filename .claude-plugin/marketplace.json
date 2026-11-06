@@ -1,8 +1,7 @@
 {
-  "name": "reportworq",
-  "description": "ReportWORQ's Claude plugins.",
+  "name": "reportworq-test",
   "owner": { "name": "ReportWORQ" },
   "plugins": [
-    { "name": "rw-env", "source": "./plugins/rw-env", "description": "Brings your ReportWORQ environment variables into each Claude session, from the lab." }
+    { "name": "rw-env-status", "source": "./plugins/rw-env-status", "description": "Test: shows your ReportWORQ lab connection and key names in Claude, never their values." }
   ]
 }
