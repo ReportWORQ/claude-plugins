@@ -1,0 +1,8 @@
+{
+  "name": "reportworq",
+  "description": "ReportWORQ's Claude plugins.",
+  "owner": { "name": "ReportWORQ" },
+  "plugins": [
+    { "name": "rw-env", "source": "./plugins/rw-env", "description": "Brings your ReportWORQ environment variables into each Claude session, from the lab." }
+  ]
+}

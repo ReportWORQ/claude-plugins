@@ -1,0 +1,6 @@
+{
+  "name": "rw-env",
+  "version": "0.1.0",
+  "description": "Brings your ReportWORQ environment variables into each Claude session, from the lab.",
+  "license": "UNLICENSED"
+}
