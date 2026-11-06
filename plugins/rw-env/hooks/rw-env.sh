@@ -2,11 +2,15 @@
 # rw-env: pull this person's environment variables from the ReportWORQ lab into each Claude session (lab ADR-0030).
 #
 #   rw-env.sh session-start   the SessionStart hook: sign in if needed, fetch, cache, write the variables
-#   rw-env.sh refresh         the same, for the skill, in a running session
+#   rw-env.sh refresh         the same, for the skill, in a running session: its next command has the new values
 #   rw-env.sh list            names and where each came from, never a value
 #
 # Anything printed reaches Claude, so nothing here ever prints a value or a token. If the lab can't be reached, the
 # last good values are used. The lab's address is fixed here on purpose and never read from the environment.
+#
+# The session's environment file gets one line, which loads $ENVSH. Claude Code runs that file before each command, so
+# whatever $ENVSH holds at that moment is what the command gets: a refresh, a sign-in finished mid-session, or a revoked
+# computer takes effect in the running session, with no new session needed.
 set -u
 umask 077
 LAB="https://lab.reportworq.com/env"
@@ -15,6 +19,7 @@ TOKEN="$DIR/token"
 PENDING="$DIR/pending"
 CACHE="$DIR/cache"
 ETAG="$DIR/etag"
+ENVSH="$DIR/env.sh"
 REFUSALS="$DIR/refusals"
 CURL=(curl -sS --proto '=https' --max-time 3)
 
@@ -51,7 +56,7 @@ start_signin() {
 }
 
 signin_message() {
-  echo "rw-env: this computer isn't connected to the ReportWORQ lab yet, so shared keys aren't available in this session. At the start of your first reply, tell the user, as a clickable link: to connect it, open $LAB/device?code=$1 , sign in with Google and press Allow; their keys will be there in their next new session."
+  echo "rw-env: this computer isn't connected to the ReportWORQ lab yet, so shared keys aren't available yet. At the start of your first reply, tell the user, as a clickable link: to connect it, open $LAB/device?code=$1 , sign in with Google and press Allow, then ask Claude to refresh their keys (or start a new session)."
 }
 
 # Finish a sign-in started by an earlier session. Answers: done, wait (message already printed), or none.
@@ -120,7 +125,7 @@ fetch() {
 
 # One line for Claude to relay: names, never values.
 describe_changes() {
-  [ -f "$CACHE" ] || { [ -s "$WORK/sorted" ] && echo "rw-env: this computer is connected to the ReportWORQ lab; $(wc -l < "$WORK/sorted" | tr -d ' ') keys are set for this session." >&3; return; }
+  [ -f "$CACHE" ] || { [ -s "$WORK/sorted" ] && echo "rw-env: this computer is connected to the ReportWORQ lab; $(wc -l < "$WORK/sorted" | tr -d ' ') keys are in place, from this session's next command on." >&3; return; }
   local changed removed
   changed="$(LC_ALL=C comm -13 "$CACHE" "$WORK/sorted" | cut -f1 | LC_ALL=C sort -u | paste -sd, - | sed 's/,/, /g')"
   removed="$(LC_ALL=C comm -23 <(cut -f1 "$CACHE" | LC_ALL=C sort -u) <(cut -f1 "$WORK/sorted" | LC_ALL=C sort -u) | paste -sd, - | sed 's/,/, /g')"
@@ -128,26 +133,66 @@ describe_changes() {
   [ -n "$removed" ] && echo "rw-env: tell the user these keys were removed from their environment: $removed." >&3
 }
 
-# Write the cache as shell into the session's environment file. Values are quoted here, never trusted as shell.
-emit() {
-  [ -n "${CLAUDE_ENV_FILE:-}" ] && [ -f "$CACHE" ] || return 0
-  local name b64 source value quote="'\\''"
-  while IFS="$(printf '\t')" read -r name b64 source; do
-    name_allowed "$name" || continue
-    value="$(printf '%s' "$b64" | base64 --decode 2>/dev/null)" || continue
-    value=${value//\'/$quote}
-    # Single quotes mean the same in bash and zsh, which is what sources this on a Mac.
-    printf "export %s='%s'\n" "$name" "$value" >> "$CLAUDE_ENV_FILE"
-  done < "$CACHE"
+QUOTE="'\\''"
+
+# Write the cache as shell into $ENVSH, whole or not at all. Values are quoted here, never trusted as shell.
+write_envsh() {
+  local name b64 source value
+  : > "$WORK/env.sh"
+  if [ -f "$CACHE" ]; then
+    while IFS="$(printf '\t')" read -r name b64 source; do
+      name_allowed "$name" || continue
+      value="$(printf '%s' "$b64" | base64 --decode 2>/dev/null)" || continue
+      value=${value//\'/$QUOTE}
+      # Single quotes mean the same in bash and zsh, which is what runs this on a Mac.
+      printf "export %s='%s'\n" "$name" "$value" >> "$WORK/env.sh"
+    done < "$CACHE"
+  fi
+  mv -f "$WORK/env.sh" "$ENVSH"
+}
+
+# The session's one line: load $ENVSH if it is there, each time a command runs.
+hook_session() {
+  [ -n "${CLAUDE_ENV_FILE:-}" ] || return 0
+  local path=${ENVSH//\'/$QUOTE}
+  printf "[ -f '%s' ] && . '%s'\n" "$path" "$path" >> "$CLAUDE_ENV_FILE"
 }
 
 forget() {
-  rm -f "$TOKEN" "$CACHE" "$ETAG" "$PENDING" "$REFUSALS"
+  rm -f "$TOKEN" "$CACHE" "$ETAG" "$PENDING" "$REFUSALS" "$ENVSH"
+}
+
+# One sync at a time on this computer, so two sessions starting together can't pair one's etag with the other's cache, or
+# put back keys another has just forgotten (Perry 7). mkdir is atomic everywhere, including a Mac without flock. A lock
+# left by a crash is taken over after a minute; one still held after 5 s is waited out by using what is saved.
+LOCK="$DIR/.lock"
+take_lock() {
+  local i
+  for i in 1 2 3 4 5 6 7 8 9 10; do
+    mkdir "$LOCK" 2>/dev/null && return 0
+    if [ -n "$(find "$LOCK" -maxdepth 0 -mmin +1 2>/dev/null)" ]; then
+      rmdir "$LOCK" 2>/dev/null
+      continue
+    fi
+    sleep 0.5
+  done
+  return 1
 }
 
 sync_now() {
+  if take_lock; then
+    trap 'rmdir "$LOCK" 2>/dev/null; rm -rf "$WORK"' EXIT
+    sync_locked "$@"
+  else
+    [ "${1:-}" = refresh ] || hook_session
+    echo "rw-env: another session is updating keys right now, so this one uses what is saved. Ask again in a moment if a key seems missing."
+  fi
+}
+
+sync_locked() {
   exec 3>&1
   local state result
+  [ "${1:-}" = refresh ] || hook_session
   if [ ! -s "$TOKEN" ]; then
     state="$(finish_signin)"
     case "$state" in
@@ -180,8 +225,8 @@ sync_now() {
       fi ;;
   esac
   [ "${1:-}" = refresh ] && [ "$result" = 304 ] && echo "rw-env: already up to date."
-  [ "${1:-}" = refresh ] && [ "$result" = 200 ] && echo "rw-env: saved. New values take effect in the user's next new session."
-  emit
+  [ "${1:-}" = refresh ] && [ "$result" = 200 ] && echo "rw-env: done. The new values are in place from this session's next command on."
+  write_envsh
 }
 
 case "${1:-}" in
