@@ -1,6 +1,7 @@
 {
   "name": "rw-env",
-  "version": "0.2.0",
-  "description": "Brings your ReportWORQ environment variables into each Claude session, from the lab.",
-  "license": "UNLICENSED"
+  "version": "0.3.0",
+  "description": "Brings your ReportWORQ environment variables into each Claude session, from the lab, and shows their status.",
+  "license": "UNLICENSED",
+  "types": "./types/index.d.ts"
 }

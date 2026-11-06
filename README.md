@@ -12,8 +12,10 @@ In a terminal session instead:
 /plugin install rw-env --marketplace ReportWORQ/claude-plugins
 ```
 
-**Then** start a new session. Claude gives you a link: open it, sign in with Google and press Allow. Then ask Claude to refresh your keys, and they are there from its next command on. Later changes arrive at each new session, or whenever you ask for a refresh.
+**Then** start a new session. The bar above the message box says **Not connected**: press **Connect**, open the sign-in page, sign in with Google and press **Allow**, then press **I pressed Allow**. Your keys are in place from that session's next command on, and every later session gets them by itself.
 
-**Your own keys** go on the lab's Environment page, under My keys. Ask Claude "what keys do I have?" to see the list.
+**Seeing your keys.** The bar shows how many keys you have, when they were saved, and anything that needs you, such as a rejected key or one to add. Press **Keys**, or type `/keys`, for the panel: each key's name, where it comes from, and whether it works, with Test, Refresh and links to change one. Values are never shown.
+
+**Your own keys** are added and changed on the lab's Environment page, which the panel's links open at the right row.
 
 This repository is a published copy; the source and tests are in ReportWORQ/infra under `lab/env/plugin`.
